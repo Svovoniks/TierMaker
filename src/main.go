@@ -110,7 +110,11 @@ func getNames() []string {
 	var lines = make([]string, 0)
 
 	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
+		text := scanner.Text()
+		if text == "" {
+			continue
+		}
+		lines = append(lines, text)
 	}
 
 	return lines
