@@ -47,6 +47,30 @@ func clearState() {
 	os.Remove(tmp_file)
 }
 
+func (s State) tmpIsInvalid() {
+	os.Rename(tmp_file, "invalid_tmp_file.tmp")
+}
+
+func (s State) validate(names []string) bool {
+	if s.Start > s.Mid {
+		return false
+	}
+
+	if s.End < s.Mid {
+		return false
+	}
+
+	if s.NamesIdx >= len(names) {
+		return false
+	}
+
+	if len(s.SortedNames) >= s.ReqLen {
+		return false
+	}
+
+	return true
+}
+
 func loadState() *State {
 	file, err := os.ReadFile(tmp_file)
 	if err != nil {
@@ -56,6 +80,7 @@ func loadState() *State {
 	var state State
 	err = json.Unmarshal(file, &state)
 	if err != nil {
+		state.tmpIsInvalid()
 		return nil
 	}
 	return &state
@@ -207,7 +232,11 @@ func getState(names *[]string) *State {
 	}
 
 	if state.Mid != -1 {
-		return state
+		if state.validate(*names) {
+			return state
+		}
+		state.tmpIsInvalid()
+		log.Fatal("tmp file found but invalid")
 	}
 
 	var newNames []string
