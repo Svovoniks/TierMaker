@@ -2,10 +2,13 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"image"
 	"log"
 	"os"
+	"slices"
+	"strings"
 
 	"gioui.org/app"
 	"gioui.org/io/key"
@@ -17,13 +20,54 @@ import (
 	"gioui.org/widget/material"
 )
 
+const tmp_file = "TierMaker.tmp"
+
+type State struct {
+	SortedNames                       []string
+	Start, End, Mid, NamesIdx, ReqLen int
+}
+
+func (s State) flushSate() {
+	js, err := json.Marshal(s)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	file, err := os.OpenFile(tmp_file, os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	defer file.Close()
+	file.Write(js)
+}
+
+func clearState() {
+	os.Remove(tmp_file)
+}
+
+func loadState() *State {
+	file, err := os.ReadFile(tmp_file)
+	if err != nil {
+		return nil
+	}
+
+	var state State
+	err = json.Unmarshal(file, &state)
+	if err != nil {
+		return nil
+	}
+	return &state
+}
+
 func main() {
 	go func() {
 		window := new(app.Window)
 		window.Option((app.Title("TierMaker")))
 		err := run(window)
 		if err != nil {
-			log.Fatal(err)
+			log.Print(err)
 		}
 		os.Exit(0)
 	}()
@@ -53,10 +97,13 @@ func (s SplitVisual) splitLayout(gtx layout.Context, left, right layout.Widget) 
 	return layout.Dimensions{Size: gtx.Constraints.Max}
 }
 
-func chooseLayout(gtx layout.Context, th *material.Theme, name1 string, name2 string, name1Button *widget.Clickable, name2Button *widget.Clickable) layout.Dimensions {
+func chooseLayout(gtx layout.Context, th *material.Theme, name1 string, name2 string, left int, name1Button *widget.Clickable, name2Button *widget.Clickable) layout.Dimensions {
 	// layout.Center.Layout(gtx, material.H3(th, "hello").Layout)
 	return layout.Flex{Axis: layout.Vertical, Spacing: layout.SpaceStart}.Layout(
 		gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Center.Layout(gtx, material.H5(th, fmt.Sprintf("%d left", left)).Layout)
+		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Center.Layout(gtx, material.H3(th, "Which one is better?").Layout)
 		}),
@@ -95,12 +142,12 @@ func FillWithLabel(gtx layout.Context, th *material.Theme, text string, button *
 func getNames() []string {
 	file, err := os.Open("titles.txt")
 	if err != nil {
-		log.Fatal("couldn't read the file")
+		log.Print("couldn't read the file")
 		return nil
 	}
 	defer func() {
 		if err = file.Close(); err != nil {
-			log.Fatal("error")
+			log.Print("error")
 		}
 	}()
 
@@ -123,7 +170,7 @@ func getNames() []string {
 func writeResults(arr []string) {
 	file, err := os.OpenFile("TierMakerResults.csv", os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
-		log.Fatal("couldn't save results")
+		log.Print("couldn't save results")
 	}
 	defer file.Close()
 
@@ -141,27 +188,78 @@ func insert(a []string, index int, value string) []string {
 	return a
 }
 
+func getState(names *[]string) *State {
+	var state = loadState()
+
+	if state == nil {
+		state = &State{}
+		if len(*names) < 2 {
+			state.SortedNames = *names
+		} else {
+			state.SortedNames = append(state.SortedNames, (*names)[0])
+			state.Start = 0
+			state.End = 1
+			state.Mid = 0
+			state.ReqLen = len(*names)
+			state.NamesIdx = 1
+		}
+		return state
+	}
+
+	if state.Mid != -1 {
+		return state
+	}
+
+	var newNames []string
+	slices.SortFunc(*names, func(i, j string) int {
+		return strings.Compare(i, j)
+	})
+
+	var srtCopy = make([]string, len(state.SortedNames))
+	copy(srtCopy, state.SortedNames)
+
+	slices.SortFunc(srtCopy, func(i, j string) int {
+		return strings.Compare(i, j)
+	})
+	var i, j = 0, 0
+
+	for i < len(srtCopy) && j < len(*names) {
+		if (*names)[j] == srtCopy[i] {
+			j++
+			i++
+		} else if (*names)[j] > srtCopy[i] {
+			i++
+		} else {
+			newNames = append(newNames, (*names)[j])
+			j++
+		}
+	}
+	if j < len(*names) {
+		newNames = append(newNames, (*names)[j:]...)
+	}
+	state.ReqLen = len(*names)
+	*names = newNames
+	state.Start = 0
+	state.End = len(srtCopy)
+	state.Mid = len(srtCopy) / 2
+	state.NamesIdx = 0
+	fmt.Println(state.SortedNames, names, state.Mid, state.Start, state.End)
+
+	return state
+}
+
 func run(window *app.Window) error {
 	theme := material.NewTheme()
 	names := getNames()
 	valid := true
+	var state *State
 	if names == nil {
 		valid = false
+	} else {
+		state = getState(&names)
 	}
 	sorted := false
-	var sortedNames []string
-	var start, end, mid = -1, -1, -1
-	var namesIdx int
-
-	if len(names) < 2 {
-		sortedNames = names
-	} else {
-		sortedNames = append(sortedNames, names[0])
-		start = 0
-		end = 1
-		mid = 0
-		namesIdx = 1
-	}
+	fmt.Println(names)
 
 	var name1Button widget.Clickable
 	var name2Button widget.Clickable
@@ -201,32 +299,36 @@ func run(window *app.Window) error {
 			}
 
 			if name1Button.Clicked(gtx) || name1KeyPress {
-				start = mid + 1
-				if start > end {
-					start = end
+				state.Start = state.Mid + 1
+				if state.Start > state.End {
+					state.Start = state.End
 				}
+				state.flushSate()
 			}
 
 			if name2Button.Clicked(gtx) || name2KeyPress {
-				end = mid
-				if end < start {
-					end = start
+				state.End = state.Mid
+				if state.End < state.Start {
+					state.End = state.Start
 				}
+				state.flushSate()
 			}
 
-			if start == end && !sorted {
-				if start != -1 {
-					sortedNames = insert(sortedNames, start, names[namesIdx])
-					start, end = 0, len(sortedNames)
-					namesIdx++
+			if state.Start == state.End && !sorted {
+				if state.Start != -1 {
+					state.SortedNames = insert(state.SortedNames, state.Start, names[state.NamesIdx])
+					state.Start, state.End = 0, len(state.SortedNames)
+					state.NamesIdx++
+					state.flushSate()
 				}
-				if len(sortedNames) == len(names) {
+				if len(state.SortedNames) == state.ReqLen {
 					sorted = true
-					writeResults(sortedNames)
+					writeResults(state.SortedNames)
+					clearState()
 				}
-				fmt.Println(sortedNames)
+				fmt.Println(state.SortedNames)
 			}
-			mid = (start + end) / 2
+			state.Mid = (state.Start + state.End) / 2
 
 			if sorted {
 				gtx := app.NewContext(&ops, e)
@@ -234,8 +336,8 @@ func run(window *app.Window) error {
 				label.Alignment = text.Middle
 				layout.Center.Layout(gtx, label.Layout)
 			} else {
-				fmt.Println(namesIdx, mid, start, end)
-				chooseLayout(gtx, theme, sortedNames[mid], names[namesIdx], &name1Button, &name2Button)
+				fmt.Println(state.NamesIdx, state.Mid, state.Start, state.End)
+				chooseLayout(gtx, theme, state.SortedNames[state.Mid], names[state.NamesIdx], state.ReqLen-len(state.SortedNames), &name1Button, &name2Button)
 			}
 			e.Frame(gtx.Ops)
 		}
