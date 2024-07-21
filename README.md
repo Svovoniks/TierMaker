@@ -7,3 +7,6 @@
 ### Pro Tips: 
 - letters in parentheses on buttons are shortcuts
 - you can close the program any time without loosing intermediate results as long as you don't touch the ```TierMaker.tmp```  file
+
+### Build:
+- build with ```go build -ldflags -H=windowsgui```
