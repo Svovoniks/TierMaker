@@ -194,7 +194,7 @@ func listView(gtx layout.Context, th *material.Theme, sortedListView *widget.Lis
 				}
 				return buttonMargins.Layout(gtx,
 					func(gtx layout.Context) layout.Dimensions {
-						btn := material.Button(th, goBackButton, "This one ("+"B"+")")
+						btn := material.Button(th, goBackButton, "Go back ("+"B"+")")
 						return btn.Layout(gtx)
 					})
 			},
