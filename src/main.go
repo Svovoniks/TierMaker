@@ -7,10 +7,11 @@ import (
 	"image"
 	"log"
 	"os"
-	"slices"
+	"os/exec"
 	"strings"
 
 	"gioui.org/app"
+	"gioui.org/font"
 	"gioui.org/io/key"
 	"gioui.org/layout"
 	"gioui.org/op"
@@ -21,42 +22,67 @@ import (
 )
 
 const tmp_file = "TierMaker.tmp"
+const titles_file = "titles.txt"
+const results_file = "TierMakerResults.csv"
 
-type State struct {
-	SortedNames                       []string
-	Start, End, Mid, NamesIdx, ReqLen int
+type StateHistory struct {
+	StateList []State
 }
 
-func (s State) flushSate() {
-	js, err := json.Marshal(s)
+func getHistory() StateHistory {
+	file, err := os.ReadFile(tmp_file)
+	var history = StateHistory{}
 	if err != nil {
-		fmt.Println(err)
+		return history
+	}
+
+	json.Unmarshal(file, &history)
+	return history
+}
+
+func (sh *StateHistory) flushHistory() {
+	err_message := "couldn't save state history"
+	file, err := os.Create(tmp_file)
+	if err != nil {
+		log.Fatal(err_message)
 		return
 	}
 
-	file, err := os.OpenFile(tmp_file, os.O_CREATE|os.O_WRONLY, 0666)
+	defer file.Close()
+
+	json, err := json.Marshal(sh)
 	if err != nil {
-		fmt.Println(err)
+		log.Fatal(err_message)
 	}
 
-	defer file.Close()
-	file.Write(js)
+	file.Write(json)
+}
+
+func (sh *StateHistory) addState(state State) {
+	sh.StateList = append(sh.StateList, state)
+	sh.flushHistory()
+}
+
+func (sh *StateHistory) popState() {
+	if len(sh.StateList) < 2 {
+		return
+	}
+	sh.StateList = sh.StateList[:len(sh.StateList)-1]
+	sh.flushHistory()
+}
+
+type State struct {
+	SortedNames                  []string
+	Start, End, NamesIdx, ReqLen int
 }
 
 func clearState() {
 	os.Remove(tmp_file)
 }
 
-func (s State) tmpIsInvalid() {
-	os.Rename(tmp_file, "invalid_tmp_file.tmp")
-}
-
 func (s State) validate(names []string) bool {
-	if s.Start > s.Mid {
-		return false
-	}
 
-	if s.End < s.Mid {
+	if s.Start > s.End {
 		return false
 	}
 
@@ -68,22 +94,11 @@ func (s State) validate(names []string) bool {
 		return false
 	}
 
+	if len(names) != s.ReqLen {
+		return false
+	}
+
 	return true
-}
-
-func loadState() *State {
-	file, err := os.ReadFile(tmp_file)
-	if err != nil {
-		return nil
-	}
-
-	var state State
-	err = json.Unmarshal(file, &state)
-	if err != nil {
-		state.tmpIsInvalid()
-		return nil
-	}
-	return &state
 }
 
 func main() {
@@ -101,9 +116,9 @@ func main() {
 
 type SplitVisual struct{}
 
-func (s SplitVisual) splitLayout(gtx layout.Context, left, right layout.Widget) layout.Dimensions {
-	leftsize := gtx.Constraints.Min.X / 2
-	rightsize := gtx.Constraints.Min.X - leftsize
+func (s SplitVisual) splitLayout(gtx layout.Context, left, middle layout.Widget, right layout.Widget) layout.Dimensions {
+	leftsize := gtx.Constraints.Min.X / 3
+	rightsize := gtx.Constraints.Min.X - 2*leftsize
 
 	{
 		gtx := gtx
@@ -113,8 +128,16 @@ func (s SplitVisual) splitLayout(gtx layout.Context, left, right layout.Widget) 
 
 	{
 		gtx := gtx
-		gtx.Constraints = layout.Exact(image.Pt(rightsize, gtx.Constraints.Max.Y))
+		gtx.Constraints = layout.Exact(image.Pt(leftsize, gtx.Constraints.Max.Y))
 		trans := op.Offset(image.Pt(leftsize, 0)).Push(gtx.Ops)
+		middle(gtx)
+		trans.Pop()
+	}
+
+	{
+		gtx := gtx
+		gtx.Constraints = layout.Exact(image.Pt(rightsize, gtx.Constraints.Max.Y))
+		trans := op.Offset(image.Pt(2*leftsize, 0)).Push(gtx.Ops)
 		right(gtx)
 		trans.Pop()
 	}
@@ -122,29 +145,94 @@ func (s SplitVisual) splitLayout(gtx layout.Context, left, right layout.Widget) 
 	return layout.Dimensions{Size: gtx.Constraints.Max}
 }
 
-func chooseLayout(gtx layout.Context, th *material.Theme, name1 string, name2 string, left int, name1Button *widget.Clickable, name2Button *widget.Clickable) layout.Dimensions {
-	// layout.Center.Layout(gtx, material.H3(th, "hello").Layout)
+func listView(gtx layout.Context, th *material.Theme, sortedListView *widget.List, items *[]string, goBackButton *widget.Clickable) layout.Dimensions {
+	var margins = layout.Inset{
+		Left:   unit.Dp(5),
+		Right:  unit.Dp(5),
+		Top:    unit.Dp(15),
+		Bottom: unit.Dp(15),
+	}
+
+	var maxLen = 0
+	for i := range len(*items) {
+		var ln = len((*items)[i])
+		if ln > maxLen {
+			maxLen = ln
+		}
+	}
+
 	return layout.Flex{Axis: layout.Vertical, Spacing: layout.SpaceStart}.Layout(
 		gtx,
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			return margins.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return sortedListView.Layout(gtx, len(*items), func(gtx layout.Context, index int) layout.Dimensions {
+					theme := *th
+					theme.Face = font.Typeface("monospace")
+					toFill := maxLen - len((*items)[index])
+					leftPadding := toFill / 2
+					rightPadding := toFill - leftPadding
+
+					centeredTitle := strings.Repeat(" ", leftPadding) + (*items)[index] + strings.Repeat(" ", rightPadding)
+
+					var margins = layout.Inset{
+						Top:    unit.Dp(6),
+						Bottom: unit.Dp(6),
+					}
+					lb := material.H5(&theme, fmt.Sprintf("%d: %s", index+1, centeredTitle))
+					lb.Alignment = text.Middle
+					return margins.Layout(gtx, lb.Layout)
+				})
+			})
+		}),
+		layout.Rigid(
+			func(gtx layout.Context) layout.Dimensions {
+				buttonMargins := layout.Inset{
+					Top:    unit.Dp(25),
+					Bottom: unit.Dp(25),
+					Right:  unit.Dp(35),
+					Left:   unit.Dp(35),
+				}
+				return buttonMargins.Layout(gtx,
+					func(gtx layout.Context) layout.Dimensions {
+						btn := material.Button(th, goBackButton, "This one ("+"B"+")")
+						return btn.Layout(gtx)
+					})
+			},
+		),
+	)
+
+}
+
+func chooseLayout(gtx layout.Context, th *material.Theme, state *State, sortedListView *widget.List, allNames *[]string, name1Button *widget.Clickable, name2Button *widget.Clickable, goBackButton *widget.Clickable) {
+	layout.Flex{Axis: layout.Vertical, Spacing: layout.SpaceStart}.Layout(
+		gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.Center.Layout(gtx, material.H5(th, fmt.Sprintf("%d left", left)).Layout)
+			return layout.Center.Layout(gtx, material.H5(th, fmt.Sprintf("%d left", state.ReqLen-len(state.SortedNames))).Layout)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Center.Layout(gtx, material.H3(th, "Which one is better?").Layout)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return SplitVisual{}.splitLayout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return FillWithLabel(gtx, th, name1, name1Button, "J")
-			}, func(gtx layout.Context) layout.Dimensions {
-				return FillWithLabel(gtx, th, name2, name2Button, "K")
-			})
+			return SplitVisual{}.splitLayout(gtx,
+				func(gtx layout.Context) layout.Dimensions {
+					return FillWithLabel(gtx, th, state.SortedNames[(state.End+state.Start)/2], name1Button, "This one (Z)")
+				},
+				func(gtx layout.Context) layout.Dimensions {
+					return listView(gtx, th, sortedListView, &state.SortedNames, goBackButton)
+				},
+				func(gtx layout.Context) layout.Dimensions {
+					return FillWithLabel(gtx, th, (*allNames)[state.NamesIdx], name2Button, "This one (X)")
+				})
 		}),
 	)
 }
 
-func FillWithLabel(gtx layout.Context, th *material.Theme, text string, button *widget.Clickable, shortcut string) layout.Dimensions {
-	layout.Flex{Axis: layout.Vertical, Spacing: layout.SpaceStart}.Layout(
+func FillWithLabel(gtx layout.Context, th *material.Theme, text string, button *widget.Clickable, buttonText string) layout.Dimensions {
+	return layout.Flex{Axis: layout.Vertical, Spacing: layout.SpaceStart}.Layout(
 		gtx,
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			return layout.Center.Layout(gtx, material.H4(th, text).Layout)
+		}),
 		layout.Rigid(
 			func(gtx layout.Context) layout.Dimensions {
 				margins := layout.Inset{
@@ -155,17 +243,16 @@ func FillWithLabel(gtx layout.Context, th *material.Theme, text string, button *
 				}
 				return margins.Layout(gtx,
 					func(gtx layout.Context) layout.Dimensions {
-						btn := material.Button(th, button, "This one ("+shortcut+")")
+						btn := material.Button(th, button, buttonText)
 						return btn.Layout(gtx)
 					})
 			},
 		),
 	)
-	return layout.Center.Layout(gtx, material.H4(th, text).Layout)
 }
 
-func getNames() []string {
-	file, err := os.Open("titles.txt")
+func getTitles() []string {
+	file, err := os.Open(titles_file)
 	if err != nil {
 		log.Print("couldn't read the file")
 		return nil
@@ -189,11 +276,15 @@ func getNames() []string {
 		lines = append(lines, text)
 	}
 
+	if len(lines) == 0 {
+		return nil
+	}
+
 	return lines
 }
 
 func writeResults(arr []string) {
-	file, err := os.OpenFile("TierMakerResults.csv", os.O_CREATE|os.O_WRONLY, 0666)
+	file, err := os.OpenFile(results_file, os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
 		log.Print("couldn't save results")
 	}
@@ -213,161 +304,159 @@ func insert(a []string, index int, value string) []string {
 	return a
 }
 
-func getState(names *[]string) *State {
-	var state = loadState()
-
-	if state == nil {
-		state = &State{}
-		if len(*names) < 2 {
-			state.SortedNames = *names
-		} else {
-			state.SortedNames = append(state.SortedNames, (*names)[0])
-			state.Start = 0
-			state.End = 1
-			state.Mid = 0
-			state.ReqLen = len(*names)
-			state.NamesIdx = 1
-		}
-		return state
-	}
-
-	if state.Mid != -1 {
-		if state.validate(*names) {
-			return state
-		}
-		state.tmpIsInvalid()
-		log.Fatal("tmp file found but invalid")
-	}
-
-	var newNames []string
-	slices.SortFunc(*names, func(i, j string) int {
-		return strings.Compare(i, j)
-	})
-
-	var srtCopy = make([]string, len(state.SortedNames))
-	copy(srtCopy, state.SortedNames)
-
-	slices.SortFunc(srtCopy, func(i, j string) int {
-		return strings.Compare(i, j)
-	})
-	var i, j = 0, 0
-
-	for i < len(srtCopy) && j < len(*names) {
-		if (*names)[j] == srtCopy[i] {
-			j++
-			i++
-		} else if (*names)[j] > srtCopy[i] {
-			i++
-		} else {
-			newNames = append(newNames, (*names)[j])
-			j++
-		}
-	}
-	if j < len(*names) {
-		newNames = append(newNames, (*names)[j:]...)
-	}
-	state.ReqLen = len(*names)
-	*names = newNames
-	state.Start = 0
-	state.End = len(srtCopy)
-	state.Mid = len(srtCopy) / 2
-	state.NamesIdx = 0
-	fmt.Println(state.SortedNames, names, state.Mid, state.Start, state.End)
-
-	return state
+func sortedView(theme *material.Theme, gtx layout.Context) {
+	label := material.H4(theme, "Everything is sorted\n\n Results have been stored in "+results_file)
+	label.Alignment = text.Middle
+	layout.Center.Layout(gtx, label.Layout)
 }
 
 func run(window *app.Window) error {
 	theme := material.NewTheme()
-	names := getNames()
-	valid := true
-	var state *State
-	if names == nil {
-		valid = false
+	titles := getTitles()
+	haveDate := true
+	history := getHistory()
+
+	var curState State
+
+	if titles == nil {
+		haveDate = false
 	} else {
-		state = getState(&names)
+		curState.ReqLen = len(titles)
 	}
+
+	if len(history.StateList) > 0 {
+		state := history.StateList[len(history.StateList)-1]
+		if !state.validate(titles) {
+			history = StateHistory{}
+		} else {
+			curState = state
+		}
+	}
+
 	sorted := false
-	fmt.Println(names)
+	fmt.Println(titles)
 
 	var name1Button widget.Clickable
 	var name2Button widget.Clickable
+	var createFileButton widget.Clickable
+	var goBackButton widget.Clickable
 	var ops op.Ops
+	sortedListView := widget.List{
+		List: layout.List{
+			Axis: layout.Vertical,
+		},
+	}
 	for {
 		switch e := window.Event().(type) {
 		case app.DestroyEvent:
 			return e.Err
 		case app.FrameEvent:
 			gtx := app.NewContext(&ops, e)
-			if !valid {
-				label := material.H4(theme, "Couldn't find file titles.txt")
-				label.Alignment = text.Middle
-				layout.Center.Layout(gtx, label.Layout)
-				e.Frame(gtx.Ops)
-				break
-			}
 			name1KeyPress := false
 			name2KeyPress := false
+			createFileKeyPress := false
+			goBackKeyPress := false
+
+			if sorted {
+				println("done")
+				sortedView(theme, gtx)
+				e.Frame(gtx.Ops)
+				continue
+			}
 
 			for {
 				ev, ok := gtx.Event(
-					key.Filter{Name: "K"},
-					key.Filter{Name: "J"},
+					key.Filter{Name: "X"},
+					key.Filter{Name: "Z"},
+					key.Filter{Name: "C"},
+					key.Filter{Name: "B"},
 				)
 				if !ok {
 					break
 				}
 				if ev.(key.Event).State == key.Press {
 					name := ev.(key.Event).Name
-					if name == "J" {
-						name1KeyPress = true
-					} else {
-						name2KeyPress = true
+					switch name {
+					case "Z":
+						{
+							name1KeyPress = true
+						}
+					case "X":
+						{
+							name2KeyPress = true
+						}
+					case "C":
+						{
+							createFileKeyPress = true
+						}
+					case "B":
+						{
+							goBackKeyPress = true
+						}
 					}
 				}
 			}
 
-			if name1Button.Clicked(gtx) || name1KeyPress {
-				state.Start = state.Mid + 1
-				if state.Start > state.End {
-					state.Start = state.End
+			if !haveDate {
+				if createFileButton.Clicked(gtx) || createFileKeyPress {
+					file, _ := os.Create(titles_file)
+					if file != nil {
+						file.Close()
+					}
+					exec.Command("cmd", "/c", "start", titles_file).Run()
+					os.Exit(0)
 				}
-				state.flushSate()
+
+				FillWithLabel(gtx, theme, "Please fill in titles.txt", &createFileButton, "Open titles.txt (C)")
+				e.Frame(gtx.Ops)
+				break
+			}
+
+			if goBackButton.Clicked(gtx) || goBackKeyPress {
+				history.popState()
+				curState = history.StateList[len(history.StateList)-1]
+			}
+
+			mid := (curState.Start + curState.End) / 2
+
+			if name1Button.Clicked(gtx) || name1KeyPress {
+				curState.Start = mid + 1
+				if curState.Start > curState.End {
+					curState.Start = curState.End
+				}
+				history.addState(curState)
 			}
 
 			if name2Button.Clicked(gtx) || name2KeyPress {
-				state.End = state.Mid
-				if state.End < state.Start {
-					state.End = state.Start
+				curState.End = mid
+				if curState.End < curState.Start {
+					curState.End = curState.Start
 				}
-				state.flushSate()
+				history.addState(curState)
 			}
 
-			if state.Start == state.End && !sorted {
-				if state.Start != -1 {
-					state.SortedNames = insert(state.SortedNames, state.Start, names[state.NamesIdx])
-					state.Start, state.End = 0, len(state.SortedNames)
-					state.NamesIdx++
-					state.flushSate()
-				}
-				if len(state.SortedNames) == state.ReqLen {
+			if curState.Start == curState.End {
+				curState.SortedNames = insert(curState.SortedNames, curState.Start, titles[curState.NamesIdx])
+				curState.Start, curState.End = 0, len(curState.SortedNames)
+				curState.NamesIdx++
+				history.popState()
+				history.addState(curState)
+
+				if len(curState.SortedNames) == curState.ReqLen {
 					sorted = true
-					writeResults(state.SortedNames)
+					writeResults(curState.SortedNames)
 					clearState()
+					sortedView(theme, gtx)
+					e.Frame(gtx.Ops)
+					continue
 				}
-				fmt.Println(state.SortedNames)
+				fmt.Println(curState.SortedNames)
 			}
-			state.Mid = (state.Start + state.End) / 2
 
-			if sorted {
-				gtx := app.NewContext(&ops, e)
-				label := material.H4(theme, "Everything is sorted\n\n Results have been stored in TierMakerResults.csv")
-				label.Alignment = text.Middle
-				layout.Center.Layout(gtx, label.Layout)
-			} else {
-				fmt.Println(state.NamesIdx, state.Mid, state.Start, state.End)
-				chooseLayout(gtx, theme, state.SortedNames[state.Mid], names[state.NamesIdx], state.ReqLen-len(state.SortedNames), &name1Button, &name2Button)
-			}
+			println(len(history.StateList))
+
+			chooseLayout(gtx, theme, &curState, &sortedListView, &titles, &name1Button, &name2Button, &goBackButton)
+
 			e.Frame(gtx.Ops)
 		}
 	}
