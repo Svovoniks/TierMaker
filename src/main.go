@@ -322,7 +322,7 @@ func getTitles() []string {
 }
 
 func writeResults(arr []string) {
-	file, err := os.OpenFile(results_file, os.O_CREATE|os.O_WRONLY, 0666)
+	file, err := os.Create(results_file)
 	if err != nil {
 		log.Print("couldn't save results")
 	}
