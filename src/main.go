@@ -8,7 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"strings"
+	"strconv"
 
 	"gioui.org/app"
 	"gioui.org/font"
@@ -116,6 +116,31 @@ func main() {
 
 type SplitVisual struct{}
 
+func (s SplitVisual) splitLayoutDyn(gtx layout.Context, layouts *[]layout.Widget, proportions *[]int) layout.Dimensions {
+	var sm = 0
+
+	for _, val := range *proportions {
+		sm += val
+	}
+
+	single_width := gtx.Constraints.Min.X / sm
+	var cur_sum = 0
+
+	for i, val := range *layouts {
+		gtx := gtx
+		cur_width := (*proportions)[i] * single_width
+		if i == len(*proportions)-1 {
+			cur_width = gtx.Constraints.Min.X - single_width*(sm-(*proportions)[i])
+		}
+		gtx.Constraints = layout.Exact(image.Pt(cur_width, (gtx.Constraints.Max.Y)))
+		trans := op.Offset(image.Pt(cur_sum, 0)).Push(gtx.Ops)
+		val(gtx)
+		trans.Pop()
+		cur_sum += cur_width
+	}
+
+	return layout.Dimensions{Size: gtx.Constraints.Max}
+}
 func (s SplitVisual) splitLayout(gtx layout.Context, left, middle layout.Widget, right layout.Widget) layout.Dimensions {
 	leftsize := gtx.Constraints.Min.X / 3
 	rightsize := gtx.Constraints.Min.X - 2*leftsize
@@ -165,21 +190,18 @@ func listView(gtx layout.Context, th *material.Theme, sortedListView *widget.Lis
 		gtx,
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return margins.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				ln_str := strconv.Itoa(len(*items)/10 + 1)
 				return sortedListView.Layout(gtx, len(*items), func(gtx layout.Context, index int) layout.Dimensions {
 					theme := *th
 					theme.Face = font.Typeface("monospace")
-					toFill := maxLen - len((*items)[index])
-					leftPadding := toFill / 2
-					rightPadding := toFill - leftPadding
-
-					centeredTitle := strings.Repeat(" ", leftPadding) + (*items)[index] + strings.Repeat(" ", rightPadding)
 
 					var margins = layout.Inset{
 						Top:    unit.Dp(6),
 						Bottom: unit.Dp(6),
 					}
-					lb := material.H5(&theme, fmt.Sprintf("%d: %s", index+1, centeredTitle))
-					lb.Alignment = text.Middle
+					lb := material.H5(&theme, fmt.Sprintf("%"+ln_str+"d: %s", index+1, (*items)[index]))
+					lb.Alignment = text.Start
+					lb.MaxLines = 1
 					return margins.Layout(gtx, lb.Layout)
 				})
 			})
@@ -209,20 +231,36 @@ func chooseLayout(gtx layout.Context, th *material.Theme, state *State, sortedLi
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Center.Layout(gtx, material.H5(th, fmt.Sprintf("%d left", state.ReqLen-len(state.SortedNames))).Layout)
 		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.Center.Layout(gtx, material.H3(th, "Which one is better?").Layout)
+		layout.Flexed(0.1, func(gtx layout.Context) layout.Dimensions {
+
+			prs := []int{2, 1}
+
+			lys := []layout.Widget{func(gtx layout.Context) layout.Dimensions {
+				lb := material.H4(th, "Which one is better?")
+				lb.MaxLines = 1
+				return layout.Center.Layout(gtx, lb.Layout)
+			}, func(gtx layout.Context) layout.Dimensions {
+				lb := material.H4(th, "Got so far")
+				lb.MaxLines = 1
+				return layout.Center.Layout(gtx, lb.Layout)
+			}}
+			return SplitVisual{}.splitLayoutDyn(gtx, &lys, &prs)
+			// return layout.Center.Layout(gtx, material.H3(th, "Which one is better?").Layout)
 		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return SplitVisual{}.splitLayout(gtx,
+		layout.Flexed(0.9, func(gtx layout.Context) layout.Dimensions {
+
+			var lys = []layout.Widget{func(gtx layout.Context) layout.Dimensions {
+				return FillWithLabel(gtx, th, state.SortedNames[(state.End+state.Start)/2], name1Button, "This one (Z)")
+			},
 				func(gtx layout.Context) layout.Dimensions {
-					return FillWithLabel(gtx, th, state.SortedNames[(state.End+state.Start)/2], name1Button, "This one (Z)")
+					return FillWithLabel(gtx, th, (*allNames)[state.NamesIdx], name2Button, "This one (X)")
 				},
 				func(gtx layout.Context) layout.Dimensions {
 					return listView(gtx, th, sortedListView, &state.SortedNames, goBackButton)
-				},
-				func(gtx layout.Context) layout.Dimensions {
-					return FillWithLabel(gtx, th, (*allNames)[state.NamesIdx], name2Button, "This one (X)")
-				})
+				}}
+
+			var props = []int{1, 1, 1}
+			return SplitVisual{}.splitLayoutDyn(gtx, &lys, &props)
 		}),
 	)
 }
